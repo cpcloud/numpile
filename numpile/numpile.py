@@ -9,19 +9,26 @@ import inspect
 import pprint
 import string
 import numpy as np
-from itertools import tee, izip
+try:
+    from itertools import izip as zip
+except ImportError:
+    pass
+
 
 from textwrap import dedent
 from collections import deque, defaultdict
 
+from toolz import first
+
 import llvm.core as lc
 import llvm.passes as lp
 import llvm.ee as le
-from llvm.core import Module, Builder, Function, Type, Constant
+from llvm.core import Type, Constant
 
 DEBUG = False
 
-### == Core Language ==
+# == Core Language ==
+
 
 class Var(ast.AST):
     _fields = ["id", "type"]
@@ -29,6 +36,7 @@ class Var(ast.AST):
     def __init__(self, id, type=None):
         self.id = id
         self.type = type
+
 
 class Assign(ast.AST):
     _fields = ["ref", "val", "type"]
@@ -38,11 +46,13 @@ class Assign(ast.AST):
         self.val = val
         self.type = type
 
+
 class Return(ast.AST):
     _fields = ["val"]
 
     def __init__(self, val):
         self.val = val
+
 
 class Loop(ast.AST):
     _fields = ["var", "begin", "end", "body"]
@@ -53,12 +63,14 @@ class Loop(ast.AST):
         self.end = end
         self.body = body
 
+
 class App(ast.AST):
     _fields = ["fn", "args"]
 
     def __init__(self, fn, args):
         self.fn = fn
         self.args = args
+
 
 class Fun(ast.AST):
     _fields = ["fname", "args", "body"]
@@ -68,12 +80,14 @@ class Fun(ast.AST):
         self.args = args
         self.body = body
 
+
 class LitInt(ast.AST):
     _fields = ["n"]
 
     def __init__(self, n, type=None):
         self.n = n
         self.type = type
+
 
 class LitFloat(ast.AST):
     _fields = ["n"]
@@ -82,11 +96,13 @@ class LitFloat(ast.AST):
         self.n = n
         self.type = None
 
+
 class LitBool(ast.AST):
     _fields = ["n"]
 
     def __init__(self, n):
         self.n = n
+
 
 class Prim(ast.AST):
     _fields = ["fn", "args"]
@@ -95,6 +111,7 @@ class Prim(ast.AST):
         self.fn = fn
         self.args = args
 
+
 class Index(ast.AST):
     _fields = ["val", "ix"]
 
@@ -102,14 +119,17 @@ class Index(ast.AST):
         self.val = val
         self.ix = ix
 
+
 class Noop(ast.AST):
     _fields = []
 
 primops = {ast.Add: "add#", ast.Mult: "mult#"}
 
-### == Type System ==
+# == Type System ==
+
 
 class TVar(object):
+
     def __init__(self, s):
         self.s = s
 
@@ -125,7 +145,9 @@ class TVar(object):
     def __str__(self):
         return self.s
 
+
 class TCon(object):
+
     def __init__(self, s):
         self.s = s
 
@@ -141,7 +163,9 @@ class TCon(object):
     def __str__(self):
         return self.s
 
+
 class TApp(object):
+
     def __init__(self, a, b):
         self.a = a
         self.b = b
@@ -158,7 +182,9 @@ class TApp(object):
     def __str__(self):
         return str(self.a) + " " + str(self.b)
 
+
 class TFun(object):
+
     def __init__(self, argtys, retty):
         assert isinstance(argtys, list)
         self.argtys = argtys
@@ -173,6 +199,7 @@ class TFun(object):
     def __str__(self):
         return str(self.argtys) + " -> " + str(self.retty)
 
+
 def ftv(x):
     if isinstance(x, TCon):
         return set()
@@ -183,6 +210,7 @@ def ftv(x):
     elif isinstance(x, TVar):
         return set([x])
 
+
 def is_array(ty):
     return isinstance(ty, TApp) and ty.a == TCon("Array")
 
@@ -191,20 +219,25 @@ int64 = TCon("Int64")
 float32 = TCon("Float")
 double64 = TCon("Double")
 void = TCon("Void")
-array = lambda t: TApp(TCon("Array"), t)
+
+
+def array(t):
+    return TApp(TCon("Array"), t)
 
 array_int32 = array(int32)
 array_int64 = array(int64)
 array_double64 = array(double64)
 
-### == Type Inference ==
+# == Type Inference ==
+
 
 def naming():
     k = 0
     while True:
         for a in string.ascii_lowercase:
-            yield ("'"+a+str(k)) if (k > 0) else (a)
-        k = k+1
+            yield ("'" + a + str(k)) if (k > 0) else (a)
+        k = k + 1
+
 
 class TypeInfer(object):
 
@@ -224,13 +257,13 @@ class TypeInfer(object):
             return self.generic_visit(node)
 
     def visit_Fun(self, node):
-        arity = len(node.args)
         self.argtys = [self.fresh() for v in node.args]
         self.retty = TVar("$retty")
         for (arg, ty) in zip(node.args, self.argtys):
             arg.type = ty
             self.env[arg.id] = ty
-        map(self.visit, node.body)
+        for part in node.body:
+            self.visit(part)
         return TFun(self.argtys, self.retty)
 
     def visit_Noop(self, node):
@@ -294,17 +327,22 @@ class TypeInfer(object):
         end = self.visit(node.end)
         self.constraints += [(varty, int32), (
             begin, int64), (end, int32)]
-        map(self.visit, node.body)
+        for part in node.body:
+            self.visit(part)
 
     def generic_visit(self, node):
         raise NotImplementedError
 
+
 class UnderDeteremined(Exception):
+
     def __str__(self):
         return "The types in the function are not fully determined by the \
                 input types. Add annotations."
 
+
 class InferError(Exception):
+
     def __init__(self, ty1, ty2):
         self.ty1 = ty1
         self.ty2 = ty2
@@ -316,10 +354,12 @@ class InferError(Exception):
             "Expected: ", "\t" + str(self.ty2)
         ])
 
-### == Constraint Solver ==
+# == Constraint Solver ==
+
 
 def empty():
     return {}
+
 
 def apply(s, t):
     if isinstance(t, TCon):
@@ -333,8 +373,10 @@ def apply(s, t):
     elif isinstance(t, TVar):
         return s.get(t.s, t)
 
+
 def applyList(s, xs):
     return [(apply(s, x), apply(s, y)) for (x, y) in xs]
+
 
 def unify(x, y):
     if isinstance(x, TApp) and isinstance(y, TApp):
@@ -356,6 +398,7 @@ def unify(x, y):
     else:
         raise InferError(x, y)
 
+
 def solve(xs):
     mgu = empty()
     cs = deque(xs)
@@ -366,27 +409,33 @@ def solve(xs):
         cs = deque(applyList(s, cs))
     return mgu
 
+
 def bind(n, x):
     if x == n:
         return empty()
     elif occurs_check(n, x):
         raise InfiniteType(n, x)
+
     else:
         return dict([(n, x)])
 
+
 def occurs_check(n, x):
     return n in ftv(x)
+
 
 def union(s1, s2):
     nenv = s1.copy()
     nenv.update(s2)
     return nenv
 
+
 def compose(s1, s2):
     s3 = dict((t, apply(s1, u)) for t, u in s2.items())
     return union(s1, s3)
 
-### == Core Translator ==
+# == Core Translator ==
+
 
 class PythonVisitor(ast.NodeVisitor):
 
@@ -410,8 +459,7 @@ class PythonVisitor(ast.NodeVisitor):
         return self.visit(self._ast)
 
     def visit_Module(self, node):
-        body = map(self.visit, node.body)
-        return body[0]
+        return first(map(self.visit, node.body))
 
     def visit_Name(self, node):
         return Var(node.id)
@@ -426,10 +474,7 @@ class PythonVisitor(ast.NodeVisitor):
         return LitBool(node.n)
 
     def visit_Call(self, node):
-        name = self.visit(node.func)
-        args = map(self.visit, node.args)
-        keywords = map(self.visit, node.keywords)
-        return App(name, args)
+        return App(self.visit(node.func), list(map(self.visit, node.args)))
 
     def visit_BinOp(self, node):
         op_str = node.op.__class__
@@ -439,7 +484,6 @@ class PythonVisitor(ast.NodeVisitor):
         return Prim(opname, [a, b])
 
     def visit_Assign(self, node):
-        targets = node.targets
 
         assert len(node.targets) == 1
         var = node.targets[0].id
@@ -447,9 +491,9 @@ class PythonVisitor(ast.NodeVisitor):
         return Assign(var, val)
 
     def visit_FunctionDef(self, node):
-        stmts = list(node.body)
-        stmts = map(self.visit, stmts)
-        args = map(self.visit, node.args.args)
+        stmts = node.body
+        stmts = list(map(self.visit, stmts))
+        args = list(map(self.visit, node.args.args))
         res = Fun(node.name, args, stmts)
         return res
 
@@ -478,9 +522,9 @@ class PythonVisitor(ast.NodeVisitor):
 
     def visit_For(self, node):
         target = self.visit(node.target)
-        stmts = map(self.visit, node.body)
+        stmts = list(map(self.visit, node.body))
         if node.iter.func.id in {"xrange", "range"}:
-            args = map(self.visit, node.iter.args)
+            args = list(map(self.visit, node.iter.args))
         else:
             raise Exception("Loop must be over range")
 
@@ -504,9 +548,11 @@ class PythonVisitor(ast.NodeVisitor):
     def generic_visit(self, node):
         raise NotImplementedError
 
-### == Pretty Printer ==
+# == Pretty Printer ==
 
 # From my coworker John Riehl, pretty sure he dont't care.
+
+
 def ast2tree(node, include_attrs=True):
     def _transform(node):
         if isinstance(node, ast.AST):
@@ -527,21 +573,24 @@ def ast2tree(node, include_attrs=True):
         raise TypeError('expected AST, got %r' % node.__class__.__name__)
     return _transform(node)
 
+
 def pformat_ast(node, include_attrs=False, **kws):
     return pprint.pformat(ast2tree(node, include_attrs), **kws)
+
 
 def dump(node):
     return pformat_ast(node)
 
-### == LLVM Codegen ==
+# == LLVM Codegen ==
 
-pointer     = Type.pointer
-int_type    = Type.int()
-float_type  = Type.float()
+pointer = Type.pointer
+int_type = Type.int()
+float_type = Type.float()
 double_type = Type.double()
-bool_type   = Type.int(1)
-void_type   = Type.void()
-void_ptr    = pointer(Type.int(8))
+bool_type = Type.int(1)
+void_type = Type.void()
+void_ptr = pointer(Type.int(8))
+
 
 def array_type(elt_type):
     return Type.struct([
@@ -555,22 +604,26 @@ int64_array = pointer(array_type(Type.int(64)))
 double_array = pointer(array_type(double_type))
 
 lltypes_map = {
-    int32          : int_type,
-    int64          : int_type,
-    float32        : float_type,
-    double64       : double_type,
-    array_int32    : int32_array,
-    array_int64    : int64_array,
-    array_double64 : double_array
+    int32: int_type,
+    int64: int_type,
+    float32: float_type,
+    double64: double_type,
+    array_int32: int32_array,
+    array_int64: int64_array,
+    array_double64: double_array
 }
+
 
 def to_lltype(ptype):
     return lltypes_map[ptype]
 
+
 def determined(ty):
     return len(ftv(ty)) == 0
 
+
 class LLVMEmitter(object):
+
     def __init__(self, spec_types, retty, argtys):
         self.function = None             # LLVM Function
         self.builder = None              # LLVM Builder
@@ -649,12 +702,12 @@ class LLVMEmitter(object):
 
     def visit_Fun(self, node):
         rettype = to_lltype(self.retty)
-        argtypes = map(to_lltype, self.argtys)
+        argtypes = list(map(to_lltype, self.argtys))
         # Create a unique specialized name
         func_name = mangler(node.fname, self.argtys)
         self.start_function(func_name, module, rettype, argtypes)
 
-        for (ar, llarg, argty) in zip(node.args, self.function.args, self.argtys):
+        for ar, llarg, argty in zip(node.args, self.function.args, self.argtys):
             name = ar.id
             llarg.name = name
 
@@ -683,7 +736,8 @@ class LLVMEmitter(object):
         if rettype is not void_type:
             self.locals['retval'] = self.builder.alloca(rettype, name="retval")
 
-        map(self.visit, node.body)
+        for part in node.body:
+            self.visit(part)
         self.end_function()
 
     def visit_Index(self, node):
@@ -735,7 +789,8 @@ class LLVMEmitter(object):
 
         # Generate the loop body
         self.set_block(body_block)
-        map(self.visit, node.body)
+        for part in node.body:
+            self.visit(part)
 
         # Increment the counter
         succ = self.builder.add(self.const(step), self.builder.load(inc))
@@ -794,7 +849,7 @@ class LLVMEmitter(object):
         else:
             return self.generic_visit(node)
 
-### == Type Mapping ==
+# == Type Mapping ==
 
 # Adapt the LLVM types to use libffi/ctypes wrapper so we can dynamically create
 # the appropriate C types for our JIT'd function at runtime.
@@ -804,19 +859,22 @@ _nptypemap = {
     'd': ctypes.c_double,
 }
 
+
 def mangler(fname, sig):
     return fname + str(hash(tuple(sig)))
+
 
 def wrap_module(sig, llfunc):
     pfunc = wrap_function(llfunc, engine)
     dispatch = dispatcher(pfunc)
     return dispatch
 
+
 def wrap_function(func, engine):
     args = func.type.pointee.args
     ret_type = func.type.pointee.return_type
     ret_ctype = wrap_type(ret_type)
-    args_ctypes = map(wrap_type, args)
+    args_ctypes = list(map(wrap_type, args))
 
     functype = ctypes.CFUNCTYPE(ret_ctype, *args_ctypes)
     fptr = engine.get_pointer_to_function(func)
@@ -825,10 +883,11 @@ def wrap_function(func, engine):
     cfunc.__name__ = func.name
     return cfunc
 
+
 def wrap_type(llvm_type):
     kind = llvm_type.kind
     if kind == lc.TYPE_INTEGER:
-        ctype = getattr(ctypes, "c_int"+str(llvm_type.width))
+        ctype = getattr(ctypes, "c_int" + str(llvm_type.width))
     elif kind == lc.TYPE_DOUBLE:
         ctype = ctypes.c_double
     elif kind == lc.TYPE_FLOAT:
@@ -859,7 +918,7 @@ def wrap_type(llvm_type):
         if hasattr(struct_type, '_fields_'):
             names = struct_type._fields_
         else:
-            names = ["field"+str(n) for n in range(llvm_type.element_count)]
+            names = ["field" + str(n) for n in range(llvm_type.element_count)]
 
         ctype = type(ctypes.Structure)(struct_name, (ctypes.Structure,),
                                        {'__module__': "numpile"})
@@ -871,14 +930,16 @@ def wrap_type(llvm_type):
         raise Exception("Unknown LLVM type %s" % kind)
     return ctype
 
+
 def wrap_ndarray(na):
     # For NumPy arrays grab the underlying data pointer. Doesn't copy.
     ctype = _nptypemap[na.dtype.char]
     _shape = list(na.shape)
     data = na.ctypes.data_as(ctypes.POINTER(ctype))
     dims = len(na.strides)
-    shape = (ctypes.c_int*dims)(*_shape)
+    shape = (ctypes.c_int * dims)(*_shape)
     return (data, dims, shape)
+
 
 def wrap_arg(arg, val):
     if isinstance(val, np.ndarray):
@@ -888,16 +949,14 @@ def wrap_arg(arg, val):
     else:
         return val
 
+
 def dispatcher(fn):
     def _call_closure(*args):
-        cargs = list(fn._argtypes_)
-        pargs = list(args)
-        rargs = map(wrap_arg, cargs, pargs)
-        return fn(*rargs)
+        return fn(*map(wrap_arg, fn._argtypes_, args))
     _call_closure.__name__ = fn.__name__
     return _call_closure
 
-### == Toplevel ==
+# == Toplevel ==
 
 module = lc.Module.new('numpile.module')
 engine = None
@@ -907,12 +966,14 @@ tm = le.TargetMachine.new(features='', cm=le.CM_JITDEFAULT)
 eb = le.EngineBuilder.new(module)
 engine = eb.create(tm)
 
+
 def autojit(fn):
     transformer = PythonVisitor()
     ast = transformer(fn)
     (ty, mgu) = typeinfer(ast)
     debug(dump(ast))
     return specialize(ast, ty, mgu)
+
 
 def arg_pytype(arg):
     if isinstance(arg, np.ndarray):
@@ -931,9 +992,10 @@ def arg_pytype(arg):
     else:
         raise Exception("Type not supported: %s" % type(arg))
 
+
 def specialize(ast, infer_ty, mgu):
     def _wrapper(*args):
-        types = map(arg_pytype, list(args))
+        types = list(map(arg_pytype, args))
         spec_ty = TFun(argtys=types, retty=TVar("$retty"))
         unifier = unify(infer_ty, spec_ty)
         specializer = compose(unifier, mgu)
@@ -956,6 +1018,7 @@ def specialize(ast, infer_ty, mgu):
             raise UnderDeteremined()
     return _wrapper
 
+
 def typeinfer(ast):
     infer = TypeInfer()
     ty = infer.visit(ast)
@@ -966,9 +1029,9 @@ def typeinfer(ast):
     debug(infer.constraints)
     return (infer_ty, mgu)
 
+
 def codegen(ast, specializer, retty, argtys):
     cgen = LLVMEmitter(specializer, retty, argtys)
-    mod = cgen.visit(ast)
     cgen.function.verify()
 
     tm = le.TargetMachine.new(opt=3, cm=le.CM_JITDEFAULT, features='')
@@ -983,6 +1046,7 @@ def codegen(ast, specializer, retty, argtys):
     debug(cgen.function)
     debug(module.to_native_assembly())
     return cgen.function
+
 
 def debug(fmt, *args):
     if DEBUG:
