@@ -357,10 +357,6 @@ class InferError(Exception):
 # == Constraint Solver ==
 
 
-def empty():
-    return {}
-
-
 def apply(s, t):
     if isinstance(t, TCon):
         return t
@@ -384,7 +380,7 @@ def unify(x, y):
         s2 = unify(apply(s1, x.b), apply(s1, y.b))
         return compose(s2, s1)
     elif isinstance(x, TCon) and isinstance(y, TCon) and (x == y):
-        return empty()
+        return {}
     elif isinstance(x, TFun) and isinstance(y, TFun):
         if len(x.argtys) != len(y.argtys):
             return Exception("Wrong number of arguments")
@@ -400,7 +396,7 @@ def unify(x, y):
 
 
 def solve(xs):
-    mgu = empty()
+    mgu = {}
     cs = deque(xs)
     while len(cs):
         (a, b) = cs.pop()
@@ -412,7 +408,7 @@ def solve(xs):
 
 def bind(n, x):
     if x == n:
-        return empty()
+        return {}
     elif occurs_check(n, x):
         raise InfiniteType(n, x)
 
@@ -449,7 +445,7 @@ class PythonVisitor(ast.NodeVisitor):
             source = dedent(inspect.getsource(source))
         if isinstance(source, types.LambdaType):
             source = dedent(inspect.getsource(source))
-        elif isinstance(source, (str, unicode)):
+        elif isinstance(source, str):
             source = dedent(source)
         else:
             raise NotImplementedError
@@ -544,6 +540,9 @@ class PythonVisitor(ast.NodeVisitor):
             return Assign(ref, Prim("mult#", [Var(ref), value]))
         else:
             raise NotImplementedError
+
+    def visit_arg(self, node):
+        return Var(node.arg)
 
     def generic_visit(self, node):
         raise NotImplementedError
@@ -985,7 +984,7 @@ def arg_pytype(arg):
             return array(double64)
         elif arg.dtype == np.dtype('float'):
             return array(float32)
-    elif isinstance(arg, int) & (arg < sys.maxint):
+    elif isinstance(arg, int) and arg < sys.maxsize:
         return int64
     elif isinstance(arg, float):
         return double64
@@ -1013,7 +1012,9 @@ def specialize(ast, infer_ty, mgu):
                 llfunc = codegen(ast, specializer, retty, argtys)
                 pyfunc = wrap_module(argtys, llfunc)
                 function_cache[key] = pyfunc
-                return pyfunc(*args)
+                result = pyfunc(*args)
+                _wrapper.llfunc = llfunc
+                return result
         else:
             raise UnderDeteremined()
     return _wrapper
@@ -1032,6 +1033,7 @@ def typeinfer(ast):
 
 def codegen(ast, specializer, retty, argtys):
     cgen = LLVMEmitter(specializer, retty, argtys)
+    cgen.visit(ast)
     cgen.function.verify()
 
     tm = le.TargetMachine.new(opt=3, cm=le.CM_JITDEFAULT, features='')
